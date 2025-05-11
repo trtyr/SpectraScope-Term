@@ -1,5 +1,9 @@
 # SpectraScope-Term
 
+## 许可证
+
+本项目采用 GNU General Public License v3.0 许可证 - 查看[LICENSE](LICENSE)文件了解更多详情。
+
 ## 项目简介
 
 **SpectraScope-Term** 是一个基于MCP的高级多终端代理服务器。
