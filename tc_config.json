@@ -1,0 +1,10 @@
+{
+    "terminal_command": [
+        "xfce4-terminal",
+        "--disable-server",
+        "--title",
+        "{title}",
+        "--command"
+    ],
+    "default_shell_command": "zsh -il"
+}

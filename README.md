@@ -1,75 +1,78 @@
 # SpectraScope-Term
 
-## 项目简介
+English | [简体中文](README_zh.md)
 
-**SpectraScope-Term** 是一个基于MCP的高级多终端代理服务器。
+## License
 
-它赋予 AI 模型独特的能力：不仅能与 Linux 终端交互，更能"观测"并控制在你桌面上真实可见的多个终端模拟器窗口。
+This project is licensed under the GNU General Public License v3.0 - see the [LICENSE](LICENSE) file for more details.
 
-并且 AI 的每一步操作都清晰可见
+## Project Introduction
 
-## 项目特点
+**SpectraScope-Term** is an advanced multi-terminal proxy server based on MCP (Model Context Protocol).
 
-与传统，只能执行终端命令的MCP终端工具不同，**SpectraScope-Term** 的核心特性在于**可视化、透明度**，AI不在只是简单的执行命令，而是真实的"操作"终端：
+It empowers AI models with the unique ability to not only interact with Linux terminals but also to "observe" and control multiple terminal emulator windows that are truly visible on your desktop.
 
-并且AI在终端中执行的每一个命令、发送的每一个按键，都会**实时、准确地反映在桌面上对应的终端窗口中**。可以清晰地“看见”AI正在做什么，不再是黑箱操作。
+Furthermore, every step the AI takes is clearly visible.
 
-## 配置文件
+## Project Features
 
-**SpectraScope-Term** 通过终端模拟器来实现终端功能，内置了如下模拟器
+Unlike traditional MCP terminal tools that can only execute terminal commands, the core features of **SpectraScope-Term** lie in **visualization and transparency**. The AI doesn't just simply execute commands; it genuinely "operates" the terminal:
 
-*	xfce4-terminal
-*	gnome-terminal
-*	konsole
-*	qterminal
-*	xterm
-*	kitty
-*	alacritty
+Every command executed and every keystroke sent by the AI in the terminal is **reflected in real-time and accurately in the corresponding terminal window on the desktop**. You can clearly "see" what the AI is doing, eliminating black-box operations.
 
-> 测试使用的环境是Kali Linux，使用的是`xfce4-terminal`，可正常使用。
+## Configuration File
 
-终端客户端 (`client.py`) 通过 `tc_config.json` 进行配置，定义AI如何启动和使用终端。
+**SpectraScope-Term** achieves terminal functionality through terminal emulators. It has built-in support for the following emulators:
 
-*   **配置文件位置**：
-    *   默认情况下，`tc_config.json` 文件应与 `client.py` 脚本放置在**同一目录**。
-    *   你也可以通过在启动 `server.py` 时设置 `MCP_TC_CONFIG_PATH` 环境变量（或使用 `--mcp-tc-config-path` 命令行参数）来指定 `tc_config.json` 的绝对路径。
+*   xfce4-terminal
+*   gnome-terminal
+*   konsole
+*   qterminal
+*   xterm
+*   kitty
+*   alacritty
 
-*   **核心配置项**：
-    *   `terminal_command`: 一个列表，用于精确指定启动你偏好的终端模拟器的命令和参数。AI创建终端时将优先使用此模板。
-        *   占位符 `{title}` 会被AI动态替换为终端窗口的标题。
-        *   命令的最后一部分通常是执行标志 (如 `--command`, `-e`)，其后将自动附加 `tmux` 启动命令。
-        *   **示例** (使用xfce4-terminal): `["xfce4-terminal", "--disable-server", "--title", "{title}", "--command"]`
-    *   `default_shell_command`: 指定新终端默认启动的shell及其参数。
-        *   **示例**: `"zsh -il"` 或 `"bash -il"` (默认)。
-        
-*   **示例 `tc_config.json`**：
+> The testing environment was Kali Linux, using `xfce4-terminal`, which worked correctly.
+
+The terminal client (`client.py`) is configured via `tc_config.json`, which defines how the AI launches and uses terminals.
+
+*   **Configuration File Location**:
+    *   By default, the `tc_config.json` file should be placed in the **same directory** as the `client.py` script.
+    *   You can also specify the absolute path to `tc_config.json` by setting the `MCP_TC_CONFIG_PATH` environment variable (or using the `--mcp-tc-config-path` command-line argument) when starting `server.py`.
+
+*   **Core Configuration Options**:
+    *   `direct_terminal_command_template` (Note: in your original text, you used `terminal_command`, but the Python code uses `direct_terminal_command_template`. I'll use the latter for consistency with the code, or you can adjust the code/config key name): A list used to precisely specify the command and arguments for launching your preferred terminal emulator. The AI will prioritize this template when creating terminals.
+        *   The placeholder `{title}` will be dynamically replaced by the AI with the terminal window's title.
+        *   The last part of the command is typically an execution flag (e.g., `--command`, `-e`), after which the `tmux` startup command will be automatically appended.
+        *   **Example** (using xfce4-terminal): `["xfce4-terminal", "--disable-server", "--title", "{title}", "--command"]`
+    *   `default_shell_command`: Specifies the default shell and its arguments to launch in new terminals.
+        *   **Example**: `"zsh -il"` or `"bash -il"` (default).
+
+*   **Example `tc_config.json`**:
 
     ```json
-	{
-		"terminal_command": [
-			"xfce4-terminal",
-			"--disable-server",
-			"--title",
-			"{title}",
-			"--command"
-		],
-		"default_shell_command": "zsh -il"
-	}
+    {
+        "direct_terminal_command_template": [
+            "xfce4-terminal",
+            "--disable-server",
+            "--title",
+            "{title}",
+            "--command"
+        ],
+        "default_shell_command": "zsh -il"
+    }
     ```
-    
-    上述配置将使得 **SpectraScope-Term** 在AI请求创建新终端时，使用 `xfce4-terminal` 终端模拟器，并默认在其中启动 `zsh -il`。
 
-## 系统要求
+    The configuration above will cause **SpectraScope-Term** to use the `xfce4-terminal` emulator when the AI requests the creation of a new terminal, and it will default to launching `zsh -il` within it.
 
-*   **操作系统**：目前仅支持Linux
-*   **核心依赖**：
-    *   Python 3.x (测试使用 Python 3.10.17 版本)
-    *   `tmux` (必须已安装，并且其路径在系统的 `PATH` 环境变量中)。
-    *   至少一个支持的桌面终端模拟器 (例如 `xfce4-terminal`, `gnome-terminal`, `konsole`, `kitty`, `alacritty`, `xterm` 等，具体取决于你的 `tc_config.json` 配置或系统默认设置)。
+## System Requirements
 
-## 演示视频
+*   **Operating System**: Currently, only Linux is supported.
+*   **Core Dependencies**:
+    *   Python 3.x (Tested with Python 3.10.17)
+    *   `tmux` (must be installed and its path included in the system's `PATH` environment variable).
+    *   At least one supported desktop terminal emulator (e.g., `xfce4-terminal`, `gnome-terminal`, `konsole`, `kitty`, `alacritty`, `xterm`, etc., depending on your `tc_config.json` configuration or system defaults).
 
-<video src="https://img.trtyr.top/video/20250511_152136.mp4" width="600" controls muted="false">
-  您的浏览器不支持视频标签，或视频无法加载。
-  <a href="https://img.trtyr.top/video/20250511_152136.mp4">直接打开视频</a>
-</video>
+## Demo Video
+
+https://github.com/user-attachments/assets/1511707a-7c56-4de7-b5a8-c4b10507bc14
