@@ -67,12 +67,15 @@ The terminal client (`client.py`) is configured via `tc_config.json`, which defi
 
 ## System Requirements
 
-*   **Operating System**: Currently, only Linux is supported.
-*   **Core Dependencies**:
-    *   Python 3.x (Tested with Python 3.10.17)
-    *   `tmux` (must be installed and its path included in the system's `PATH` environment variable).
-    *   At least one supported desktop terminal emulator (e.g., `xfce4-terminal`, `gnome-terminal`, `konsole`, `kitty`, `alacritty`, `xterm`, etc., depending on your `tc_config.json` configuration or system defaults).
+*   **操作系统**：目前仅支持Linux
+*   **核心依赖**：
+    *   Python 3.x (测试使用 Python 3.10.17 版本)
+    *   `tmux` (必须已安装，并且其路径在系统的 `PATH` 环境变量中)。
+    *   至少一个支持的桌面终端模拟器 (例如 `xfce4-terminal`, `gnome-terminal`, `konsole`, `kitty`, `alacritty`, `xterm` 等，具体取决于你的 `tc_config.json` 配置或系统默认设置)。
 
-## Demo Video
+## 演示视频
 
-https://github.com/user-attachments/assets/1511707a-7c56-4de7-b5a8-c4b10507bc14
+<video src="https://img.trtyr.top/video/20250511_152136.mp4" width="600" controls muted="false">
+  您的浏览器不支持视频标签，或视频无法加载。
+  <a href="https://img.trtyr.top/video/20250511_152136.mp4">直接打开视频</a>
+</video>
