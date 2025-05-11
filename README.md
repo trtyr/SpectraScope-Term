@@ -69,6 +69,7 @@
 
 ## 演示视频
 
-<video width="320" height="240" controls>
-    <source src="https://img.trtyr.top/video/20250511_152136.mp4" type="video/mp4">
+<video src="https://img.trtyr.top/video/20250511_152136.mp4" width="600" controls muted="false">
+  您的浏览器不支持视频标签，或视频无法加载。
+  <a href="https://img.trtyr.top/video/20250511_152136.mp4">直接打开视频</a>
 </video>
