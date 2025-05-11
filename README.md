@@ -67,3 +67,8 @@
     *   `tmux` (必须已安装，并且其路径在系统的 `PATH` 环境变量中)。
     *   至少一个支持的桌面终端模拟器 (例如 `xfce4-terminal`, `gnome-terminal`, `konsole`, `kitty`, `alacritty`, `xterm` 等，具体取决于你的 `tc_config.json` 配置或系统默认设置)。
 
+## 演示视频
+
+<video width="320" height="240" controls>
+    <source src="https://img.trtyr.top/video/20250511_152136.mp4?q-sign-algorithm=sha1&q-ak=AKIDzLfEA40yjyqMV0gmmIzoSE9zELO0poF6&q-sign-time=1746952767;1746959967&q-key-time=1746952767;1746959967&q-header-list=&q-url-param-list=&q-signature=61d2bd32c3f205b47239e0c4148fc1843bb77a01&x-cos-security-token=7aaa997254f622d3e6137fa89717e4fbddf5220520001" type="video/mp4">
+</video>
