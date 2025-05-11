@@ -8,7 +8,7 @@ This project is licensed under the GNU General Public License v3.0 - see the [LI
 
 ## Project Introduction
 
-**SpectraScope-Term** is an advanced multi-terminal proxy server based on MCP (Model Context Protocol).
+**SpectraScope-Term** is an advanced multi-terminal proxy server based on MCP.
 
 It empowers AI models with the unique ability to not only interact with Linux terminals but also to "observe" and control multiple terminal emulator windows that are truly visible on your desktop.
 
