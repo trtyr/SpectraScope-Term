@@ -73,6 +73,26 @@ The terminal client (`client.py`) is configured via `tc_config.json`, which defi
     *   `tmux` (must be installed and its path included in the system's `PATH` environment variable).
     *   At least one supported desktop terminal emulator (e.g., `xfce4-terminal`, `gnome-terminal`, `konsole`, `kitty`, `alacritty`, `xterm`, etc., depending on your `tc_config.json` configuration or system defaults).
 
+## Usage
+
+``` 
+´ sudo uv run server.py -h 
+usage: server.py [-h] [--host HOST] [--port PORT] [--tc-script-path TC_SCRIPT_PATH] [--mcp-tc-config-path MCP_TC_ CONFIG_PATH] Usage
+
+Run the MCP Multi-Terminal Server
+
+Options:
+  -h, --help Display help information and exit
+  --host HOST Host to bind to (default: 0.0.0.0)
+  --port PORT Port to listen on (default: 10002 or MCP_PORT environment variable)
+  --tc-script-path TC_SCRIPT_PATH 
+ Absolute path to terminal-client.py (optional, overrides default search)
+  --mcp-tc-config-path MCP_TC_CONFIG_PATH 
+ Absolute path to tc_config.json (optional, will be set to MCP_TC_CONFIG_PATH environment variable) 
+```.
+
+Translated with DeepL.com (free version)
+
 ## Demo Video
 
 https://github.com/user-attachments/assets/1511707a-7c56-4de7-b5a8-c4b10507bc14
