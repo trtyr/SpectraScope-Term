@@ -71,6 +71,24 @@
     *   `tmux` (必须已安装，并且其路径在系统的 `PATH` 环境变量中)。
     *   至少一个支持的桌面终端模拟器 (例如 `xfce4-terminal`, `gnome-terminal`, `konsole`, `kitty`, `alacritty`, `xterm` 等，具体取决于你的 `tc_config.json` 配置或系统默认设置)。
 
+## 使用方法
+
+```
+❯ sudo uv run server.py -h
+usage: server.py [-h] [--host HOST] [--port PORT] [--tc-script-path TC_SCRIPT_PATH] [--mcp-tc-config-path MCP_TC_CONFIG_PATH]
+
+运行MCP多终端服务器
+
+options:
+  -h, --help            show this help message and exit
+  --host HOST           绑定的主机 (默认: 0.0.0.0)
+  --port PORT           监听的端口 (默认: 10002 或 MCP_PORT环境变量)
+  --tc-script-path TC_SCRIPT_PATH
+                        终端客户端.py的绝对路径 (可选, 覆盖默认搜索)
+  --mcp-tc-config-path MCP_TC_CONFIG_PATH
+                        tc_config.json的绝对路径 (可选, 会被设置为MCP_TC_CONFIG_PATH环境变量)
+```
+
 ## 演示视频
 
 https://github.com/user-attachments/assets/1511707a-7c56-4de7-b5a8-c4b10507bc14
