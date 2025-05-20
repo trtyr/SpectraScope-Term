@@ -76,7 +76,7 @@ The terminal client (`client.py`) is configured via `tc_config.json`, which defi
 ## Usage
 
 ``` 
-´ sudo uv run server.py -h 
+❯ sudo uv run server.py -h
 usage: server.py [-h] [--host HOST] [--port PORT] [--tc-script-path TC_SCRIPT_PATH] [--mcp-tc-config-path MCP_TC_ CONFIG_PATH] Usage
 
 Run the MCP Multi-Terminal Server
@@ -89,7 +89,7 @@ Options:
  Absolute path to terminal-client.py (optional, overrides default search)
   --mcp-tc-config-path MCP_TC_CONFIG_PATH 
  Absolute path to tc_config.json (optional, will be set to MCP_TC_CONFIG_PATH environment variable) 
-```.
+```
 
 Translated with DeepL.com (free version)
 
