@@ -7,6 +7,16 @@ import sys
 import uuid
 from contextlib import asynccontextmanager
 from typing import Any, AsyncIterator, Dict, Optional, List
+from pathlib import Path
+import datetime
+from rich.console import Console
+from rich.live import Live
+from rich.panel import Panel
+from rich.table import Table
+from rich.layout import Layout
+from rich.text import Text
+from rich.spinner import Spinner
+from rich.style import Style
 
 from mcp.server.fastmcp import FastMCP, Context
 import uvicorn
@@ -36,6 +46,24 @@ mcp_server_instance = FastMCP(
     version="3.0.0",
     description="MCP服务器，用于通过终端客户端（TC）管理多个可见的终端。AI可以控制命令执行并查看输出。",
 )
+
+# 添加终端状态监控相关常量和变量
+TERMINAL_STATUS_CHECK_INTERVAL = 10  # 状态检查间隔（秒）
+TERMINAL_STATUS_TIMEOUT = 5  # 状态检查超时时间（秒）
+
+# 添加健康检查相关常量和变量
+HEALTH_CHECK_INTERVAL = 30  # 健康检查间隔（秒）
+MAX_RECONNECT_ATTEMPTS = 3  # 最大重连次数
+RECONNECT_DELAY = 5  # 重连延迟（秒）
+
+
+class TerminalHealth:
+
+    def __init__(self):
+        self.last_check_time = None
+        self.reconnect_attempts = 0
+        self.is_healthy = True
+        self.last_error = None
 
 
 async def send_to_tc(action: str,
@@ -174,12 +202,122 @@ async def tc_stderr_logger(stderr_reader: asyncio.StreamReader):
     logger.info("TC stderr记录器正在停止。")
 
 
+async def check_server_health():
+    """检查服务器健康状态"""
+    try:
+        # 检查终端客户端状态
+        if not tc_process or tc_process.returncode is not None:
+            return False, "终端客户端进程已退出"
+
+        # 检查通信状态
+        ping_response = await send_to_tc("ping_tc", {}, request_timeout=5.0)
+        if not ping_response.get("success"):
+            return False, "终端客户端无响应"
+
+        return True, "服务器运行正常"
+    except Exception as e:
+        return False, f"健康检查失败: {str(e)}"
+
+
+async def attempt_reconnect():
+    """尝试重新连接终端客户端"""
+    global tc_process, tc_writer, tc_reader, tc_stderr_task, tc_stdout_handler_task
+
+    if terminal_health.reconnect_attempts >= MAX_RECONNECT_ATTEMPTS:
+        logger.error("达到最大重连次数，停止重连")
+        return False
+
+    terminal_health.reconnect_attempts += 1
+    logger.info(f"尝试重连终端客户端 (第 {terminal_health.reconnect_attempts} 次)")
+
+    try:
+        # 清理旧的连接
+        if tc_writer and not tc_writer.is_closing():
+            tc_writer.close()
+        if tc_stderr_task and not tc_stderr_task.done():
+            tc_stderr_task.cancel()
+        if tc_stdout_handler_task and not tc_stdout_handler_task.done():
+            tc_stdout_handler_task.cancel()
+
+        # 重新启动终端客户端
+        current_dir = os.path.dirname(os.path.abspath(__file__))
+        tc_script_path = os.path.join(current_dir, "client.py")
+
+        tc_process = await asyncio.create_subprocess_exec(
+            sys.executable,
+            "-u",
+            tc_script_path,
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            preexec_fn=os.setsid if sys.platform != "win32" else None)
+
+        if tc_process.stdin is None or tc_process.stdout is None or tc_process.stderr is None:
+            raise RuntimeError("未能获取TC进程的stdio管道")
+
+        tc_writer = tc_process.stdin
+        tc_reader = tc_process.stdout
+        tc_stderr_reader_for_task = tc_process.stderr
+
+        tc_stderr_task = asyncio.create_task(
+            tc_stderr_logger(tc_stderr_reader_for_task))
+        tc_stdout_handler_task = asyncio.create_task(
+            tc_stdout_message_handler(tc_reader))
+
+        # 验证连接
+        ping_response = await send_to_tc("ping_tc", {}, request_timeout=5.0)
+        if not ping_response.get("success"):
+            raise RuntimeError("重连后ping失败")
+
+        logger.info("终端客户端重连成功")
+        terminal_health.reconnect_attempts = 0
+        terminal_health.is_healthy = True
+        terminal_health.last_error = None
+        return True
+
+    except Exception as e:
+        logger.error(f"重连失败: {e}")
+        terminal_health.last_error = str(e)
+        return False
+
+
+async def health_check_task():
+    """定期执行健康检查"""
+    while not TS_SHUTDOWN_EVENT.is_set():
+        try:
+            is_healthy, message = await check_server_health()
+            terminal_health.is_healthy = is_healthy
+            terminal_health.last_check_time = datetime.datetime.now()
+
+            if not is_healthy:
+                logger.warning(f"健康检查失败: {message}")
+                if not terminal_health.is_healthy:
+                    await attempt_reconnect()
+            else:
+                terminal_health.reconnect_attempts = 0
+                terminal_health.last_error = None
+
+        except Exception as e:
+            logger.error(f"健康检查任务出错: {e}")
+
+        await asyncio.sleep(HEALTH_CHECK_INTERVAL)
+
+
+# 初始化健康检查对象
+terminal_health = TerminalHealth()
+
+
 @asynccontextmanager
 async def tc_subprocess_lifespan_manager(
         mcp_server: FastMCP) -> AsyncIterator[None]:
     global tc_process, tc_writer, tc_reader, tc_stderr_task, tc_stdout_handler_task, TS_SHUTDOWN_EVENT, active_terminals
     TS_SHUTDOWN_EVENT.clear()
     active_terminals.clear()
+
+    # 启动终端状态监控任务和健康检查任务
+    status_monitor_task = None
+    health_check_task_instance = None
+
     logger.info("TC子进程生命周期管理器: 启动中...")
     current_dir = os.path.dirname(os.path.abspath(__file__))
     tc_script_name = "client.py"
@@ -200,6 +338,8 @@ async def tc_subprocess_lifespan_manager(
                 )
 
     logger.info(f"尝试启动TC脚本: {tc_script_path}")
+    status.update_status("正在启动终端客户端...", "running", "main")
+    status.refresh_display()
 
     try:
         tc_process = await asyncio.create_subprocess_exec(
@@ -233,16 +373,37 @@ async def tc_subprocess_lifespan_manager(
             tc_stdout_message_handler(tc_reader))
 
         logger.info("正在Ping TC以检查是否就绪...")
+        status.update_status("正在检查终端客户端状态...", "running", "main")
+        status.refresh_display()
+
         ping_response = await send_to_tc("ping_tc", {}, request_timeout=15.0)
         if not ping_response.get("success") or ping_response.get(
                 "message") != "pong":
+            status.update_status("终端客户端未就绪", "error", "main")
+            status.refresh_display()
             raise RuntimeError(f"TC未响应ping或报告未就绪: {ping_response}")
+
+        status.update_status("终端客户端已就绪", "success", "main")
+        status.update_status(
+            f"服务器状态: {ping_response.get('tc_status', 'ready')}", "success",
+            "sub")
+        status.refresh_display()
+
         logger.info(f"TC已就绪。状态: {ping_response.get('tc_status')}")
         logger.info("===================================================")
         logger.info("=== 终端服务器和客户端均已准备就绪并可操作 ===")
         logger.info("===================================================")
 
+        # 加载保存的终端会话
+        await load_terminal_sessions()
+
+        # 启动状态监控任务和健康检查任务
+        status_monitor_task = asyncio.create_task(monitor_terminal_statuses())
+        health_check_task_instance = asyncio.create_task(health_check_task())
+
     except Exception as e_startup:
+        status.update_status(f"启动失败: {str(e_startup)}", "error", "main")
+        status.refresh_display()
         logger.error(f"TC子进程生命周期管理器: 启动或ping TC失败: {e_startup}", exc_info=True)
         if tc_process and tc_process.returncode is None:
             try:
@@ -257,7 +418,20 @@ async def tc_subprocess_lifespan_manager(
     yield
 
     logger.info("TC子进程生命周期管理器: 关闭TC中...")
-    TS_SHUTDOWN_EVENT.set()
+    status.is_shutting_down = True
+    status.clear_status()
+    status.update_status("正在关闭终端客户端...", "warning", "main")
+    status.refresh_display()
+
+    # 取消健康检查任务
+    if health_check_task_instance and not health_check_task_instance.done():
+        health_check_task_instance.cancel()
+        try:
+            await health_check_task_instance
+        except asyncio.CancelledError:
+            logger.info("健康检查任务已取消")
+        except Exception as e:
+            logger.error(f"等待健康检查任务取消时出错: {e}")
 
     if tc_writer and not tc_writer.is_closing():
         logger.info("正在向TC发送关闭命令...")
@@ -346,6 +520,18 @@ async def tc_subprocess_lifespan_manager(
 
     active_terminals.clear()
     logger.info("TC子进程生命周期管理器: 关闭完成。")
+    status.update_status("终端客户端已关闭", "success", "main")
+    status.refresh_display()
+
+    # 取消状态监控任务
+    if status_monitor_task and not status_monitor_task.done():
+        status_monitor_task.cancel()
+        try:
+            await status_monitor_task
+        except asyncio.CancelledError:
+            logger.info("终端状态监控任务已取消")
+        except Exception as e:
+            logger.error(f"等待终端状态监控任务取消时出错: {e}")
 
 
 @asynccontextmanager
@@ -400,6 +586,7 @@ async def create_terminal(
             "visible_window_info": response.get("visible_window_info")
         }
         logger.info(f"终端 {terminal_id} (用途: {purpose}) 已由TC成功创建。")
+        await save_terminal_sessions()
         return {
             "success": True,
             "terminal_id": terminal_id,
@@ -447,6 +634,7 @@ async def close_terminal(ctx: Context, terminal_id: str) -> Dict[str, Any]:
     if response.get("success"):
         logger.info(f"终端 {terminal_id} (tmux: {tmux_session_name}) 已由TC成功关闭。")
         if terminal_id in active_terminals: del active_terminals[terminal_id]
+        await save_terminal_sessions()
         return {"success": True, "message": response.get("message", "终端已关闭。")}
     else:
         if "not found" in response.get(
@@ -470,18 +658,21 @@ async def send_command_to_terminal(
         wait_seconds_after_command: float = 1.5,
         strip_ansi_for_snapshot: bool = True) -> Dict[str, Any]:
     """
-    向指定的终端发送一个命令（会自动在命令后附加回车执行），等待一段时间后捕获并返回该终端的完整屏幕快照。
-    这使你能够看到命令执行后的结果。
+    向指定的终端发送一个命令，等待指定时间后捕获并返回该终端的完整屏幕快照。
+    这个工具适合执行命令并立即获取结果。对于长时间运行的命令（如sqlmap），建议：
+    1. 先发送命令
+    2. 然后使用 get_terminal_snapshot 工具定期检查终端输出
 
     Args:
         terminal_id: 目标终端的ID。
         command: 要发送的命令字符串。
-        wait_seconds_after_command: (可选) 发送命令后等待多少秒再捕获快照。默认为1.5秒。对于耗时较长的命令，可以适当增加此值以确保命令有足够时间产生输出。
-        strip_ansi_for_snapshot: (可选) 是否从返回的快照中移除ANSI颜色等转义序列。默认为True，以获取纯文本内容。
+        wait_seconds_after_command: (可选) 发送命令后等待多少秒再捕获快照。默认为1.5秒。
+            对于耗时较长的命令，可以适当增加此值以确保命令有足够时间产生输出。
+        strip_ansi_for_snapshot: (可选) 是否从返回的快照中移除ANSI颜色等转义序列。默认为True。
 
     Returns:
         一个包含以下键的字典:
-        - success (bool): 命令是否成功发送以及是否（可能）已捕获快照。
+        - success (bool): 命令是否成功发送以及是否已捕获快照。
         - message (str): 操作结果的消息。
         - snapshot_content (Optional[str]): 捕获到的终端屏幕内容。如果捕获失败则为None。
         - ansi_stripped (bool): 指示返回的快照内容是否已移除ANSI代码。
@@ -568,8 +759,20 @@ RESOURCE_SCHEME = "api"
     f"{RESOURCE_SCHEME}://terminal/{{terminal_id}}/snapshot")
 async def get_terminal_snapshot(terminal_id: str) -> str:
     """
-    获取指定终端当前可见内容的快照。你需要提供`terminal_id`。
-    此资源调用目前默认移除ANSI颜色代码。如果需要控制ANSI代码的移除，请使用`send_command_to_terminal`工具并在其参数中指定。
+    获取指定终端当前可见内容的快照。这是一个实时监控工具，你可以随时调用它来查看终端的最新输出，
+    无论命令是否执行完毕。特别适合：
+    1. 监控长时间运行的命令（如sqlmap、nmap等）
+    2. 检查命令执行进度
+    3. 获取终端当前状态
+
+    注意：此工具只返回当前可见的终端内容，不会等待命令执行完成。
+    如果需要持续监控命令输出，建议定期调用此工具。
+
+    Args:
+        terminal_id: 要获取快照的终端ID。
+
+    Returns:
+        终端当前可见的文本内容。如果终端不存在或发生错误，将返回错误信息。
     """
     strip_ansi_for_resource_call = True
     logger.info(
@@ -602,8 +805,25 @@ async def get_terminal_snapshot(terminal_id: str) -> str:
     f"{RESOURCE_SCHEME}://terminal/{{terminal_id}}/context")
 async def get_terminal_context(terminal_id: str) -> Dict[str, Any]:
     """
-    获取指定终端的上下文信息。你需要提供`terminal_id`。
-    返回的信息包括当前工作目录（CWD）、终端用途（purpose）、状态以及可见窗口信息。
+    获取指定终端的上下文信息，包括当前工作目录、终端状态等。
+    这个工具可以帮助你了解终端的当前状态，比如：
+    1. 终端是否在等待输入
+    2. 当前工作目录
+    3. 终端是否处于活动状态
+
+    Args:
+        terminal_id: 要获取上下文信息的终端ID。
+
+    Returns:
+        一个包含以下信息的字典:
+        - success (bool): 操作是否成功
+        - terminal_id (str): 终端ID
+        - purpose (str): 终端用途
+        - status (str): 终端状态
+        - current_working_directory (str): 当前工作目录
+        - is_awaiting_input (bool): 是否在等待输入
+        - last_status_check (str): 最后状态检查时间
+        - visible_window_info (dict): 可见窗口信息
     """
     logger.info(
         f"TS: MCP资源 '{RESOURCE_SCHEME}://terminal/{terminal_id}/context' 被调用。")
@@ -611,44 +831,346 @@ async def get_terminal_context(terminal_id: str) -> Dict[str, Any]:
         return {"success": False, "message": f"终端ID '{terminal_id}' 未找到。"}
 
     term_info = active_terminals[terminal_id]
-    tmux_session_name = term_info["tmux_session_name"]
-    tc_context_timeout = 10.0
-    payload = {
-        "terminal_id": terminal_id,
-        "tmux_session_name": tmux_session_name
-    }
-    response = await send_to_tc("get_context",
-                                payload,
-                                request_timeout=tc_context_timeout)
 
-    if response.get("success"):
-        response["purpose"] = term_info.get("purpose")
-        response["terminal_id"] = terminal_id
-        response["status"] = term_info.get("status", "unknown")
-        response["visible_window_info"] = term_info.get(
-            "visible_window_info", response.get("visible_window_info"))
-    return response
+    # 获取最新状态
+    status_info = await check_terminal_status(terminal_id, term_info)
+
+    # 更新终端信息
+    if status_info["status"] != "closed":
+        active_terminals[terminal_id].update({
+            "status":
+            status_info["status"],
+            "last_status_check":
+            status_info["timestamp"],
+            "current_working_directory":
+            status_info.get("current_working_directory"),
+            "is_awaiting_input":
+            status_info.get("is_awaiting_input", False),
+            "last_content":
+            status_info.get("last_content")
+        })
+    else:
+        if terminal_id in active_terminals:
+            del active_terminals[terminal_id]
+        await save_terminal_sessions()
+        return {"success": False, "message": f"终端 {terminal_id} 已关闭。"}
+
+    return {
+        "success": True,
+        "terminal_id": terminal_id,
+        "purpose": term_info.get("purpose"),
+        "status": status_info["status"],
+        "current_working_directory":
+        status_info.get("current_working_directory"),
+        "is_awaiting_input": status_info.get("is_awaiting_input", False),
+        "last_status_check": status_info["timestamp"],
+        "visible_window_info": term_info.get("visible_window_info")
+    }
 
 
 @mcp_server_instance.resource(f"{RESOURCE_SCHEME}://terminals/list")
 async def list_active_terminals() -> Dict[str, Any]:
     """
     列出当前由此服务器管理的所有活动终端。
-    返回每个终端的ID、用途、状态和可见窗口信息。
-    当你需要知道有哪些终端可用或者想操作一个已存在的终端但忘记了其ID时，可以使用此功能。
+    这个工具可以帮助你：
+    1. 查看所有可用的终端
+    2. 获取终端的基本信息
+    3. 在忘记终端ID时找到正确的终端
+
+    Returns:
+        一个包含以下信息的字典:
+        - success (bool): 操作是否成功
+        - active_terminals (dict): 活动终端列表，每个终端包含其ID、用途、状态等信息
     """
     logger.info(f"TS: MCP资源 '{RESOURCE_SCHEME}://terminals/list' 被调用。")
     return {"success": True, "active_terminals": dict(active_terminals)}
 
 
+# 添加会话持久化相关函数
+async def save_terminal_sessions():
+    """保存当前活动的终端会话到文件"""
+    sessions_file = Path("terminal_sessions.json")
+    sessions_data = {
+        "terminals": active_terminals,
+        "timestamp": str(datetime.datetime.now())
+    }
+    try:
+        with open(sessions_file, 'w', encoding='utf-8') as f:
+            json.dump(sessions_data, f, ensure_ascii=False, indent=2)
+        logger.info(f"已保存 {len(active_terminals)} 个终端会话到文件")
+    except Exception as e:
+        logger.error(f"保存终端会话失败: {e}")
+
+
+async def load_terminal_sessions():
+    """从文件加载终端会话"""
+    sessions_file = Path("terminal_sessions.json")
+    if not sessions_file.exists():
+        return
+
+    try:
+        with open(sessions_file, 'r', encoding='utf-8') as f:
+            sessions_data = json.load(f)
+
+        # 验证会话是否仍然有效
+        for terminal_id, term_info in sessions_data.get("terminals",
+                                                        {}).items():
+            success, _, _ = await run_tmux_command_for_session(
+                term_info["tmux_session_name"],
+                ["has-session", "-t", term_info["tmux_session_name"]],
+                timeout=2.0)
+            if success:
+                active_terminals[terminal_id] = term_info
+                logger.info(f"已恢复终端会话: {terminal_id}")
+            else:
+                logger.warning(f"终端会话 {terminal_id} 已失效，跳过恢复")
+
+        logger.info(f"已从文件加载 {len(active_terminals)} 个终端会话")
+    except Exception as e:
+        logger.error(f"加载终端会话失败: {e}")
+
+
+async def check_terminal_status(terminal_id: str,
+                                term_info: Dict[str, Any]) -> Dict[str, Any]:
+    """检查单个终端的状态"""
+    tmux_session_name = term_info["tmux_session_name"]
+    current_status = term_info.get("status", "unknown")
+
+    try:
+        # 检查 tmux 会话是否存在
+        success, _, _ = await run_tmux_command_for_session(
+            tmux_session_name, ["has-session", "-t", tmux_session_name],
+            timeout=TERMINAL_STATUS_TIMEOUT)
+
+        if not success:
+            return {
+                "terminal_id": terminal_id,
+                "status": "closed",
+                "reason": "tmux_session_not_found",
+                "timestamp": str(datetime.datetime.now())
+            }
+
+        # 获取当前工作目录
+        cwd = await get_cwd_for_session(tmux_session_name)
+
+        # 获取终端内容
+        content = await get_tmux_pane_content_for_session(tmux_session_name,
+                                                          strip_ansi=True)
+
+        # 检查终端是否在等待输入
+        is_awaiting_input = False
+        if content:
+            last_line = content.strip().split('\n')[-1]
+            # 检查是否以常见的提示符结尾
+            is_awaiting_input = any(
+                last_line.endswith(prompt) for prompt in ['$', '#', '>', '%'])
+
+        return {
+            "terminal_id": terminal_id,
+            "status": "active",
+            "current_working_directory": cwd,
+            "is_awaiting_input": is_awaiting_input,
+            "last_content": content,
+            "timestamp": str(datetime.datetime.now())
+        }
+
+    except Exception as e:
+        logger.error(f"检查终端 {terminal_id} 状态时出错: {e}")
+        return {
+            "terminal_id": terminal_id,
+            "status": "error",
+            "reason": str(e),
+            "timestamp": str(datetime.datetime.now())
+        }
+
+
+async def monitor_terminal_statuses():
+    """定期监控所有终端的状态"""
+    while not TS_SHUTDOWN_EVENT.is_set():
+        try:
+            for terminal_id, term_info in list(active_terminals.items()):
+                status_info = await check_terminal_status(
+                    terminal_id, term_info)
+
+                # 更新终端状态
+                if status_info["status"] == "closed":
+                    logger.warning(f"终端 {terminal_id} 已关闭，从活动列表中移除")
+                    if terminal_id in active_terminals:
+                        del active_terminals[terminal_id]
+                    await save_terminal_sessions()
+                else:
+                    # 更新终端信息
+                    active_terminals[terminal_id].update({
+                        "status":
+                        status_info["status"],
+                        "last_status_check":
+                        status_info["timestamp"],
+                        "current_working_directory":
+                        status_info.get("current_working_directory"),
+                        "is_awaiting_input":
+                        status_info.get("is_awaiting_input", False),
+                        "last_content":
+                        status_info.get("last_content")
+                    })
+
+            # 保存更新后的会话状态
+            await save_terminal_sessions()
+
+        except Exception as e:
+            logger.error(f"监控终端状态时出错: {e}")
+
+        await asyncio.sleep(TERMINAL_STATUS_CHECK_INTERVAL)
+
+
 if __name__ == "__main__":
+    # 配置日志
+    log_file = "app.log"
+
+    # 创建日志目录（如果不存在）
+    log_dir = os.path.dirname(log_file)
+    if log_dir and not os.path.exists(log_dir):
+        os.makedirs(log_dir)
+
+    # 配置根日志记录器
     logging.basicConfig(
         level=logging.INFO,
         format=
-        "%(asctime)s - TS_LOG - %(levelname)s - [%(name)s] - %(filename)s:%(lineno)d - %(message)s",
-        stream=sys.stdout,
-    )
-    logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
+        "%(asctime)s - %(levelname)s - [%(name)s] - %(filename)s:%(lineno)d - %(message)s",
+        handlers=[logging.FileHandler(log_file, encoding='utf-8')])
+
+    # 禁用所有日志的终端输出
+    for logger_name in logging.root.manager.loggerDict:
+        logger = logging.getLogger(logger_name)
+        logger.handlers = [
+            h for h in logger.handlers if isinstance(h, logging.FileHandler)
+        ]
+        logger.propagate = False
+
+    # 设置 uvicorn 的日志配置
+    uvicorn_logger = logging.getLogger("uvicorn")
+    uvicorn_logger.handlers = [logging.FileHandler(log_file, encoding='utf-8')]
+    uvicorn_logger.propagate = False
+
+    access_logger = logging.getLogger("uvicorn.access")
+    access_logger.handlers = [logging.FileHandler(log_file, encoding='utf-8')]
+    access_logger.propagate = False
+
+    error_logger = logging.getLogger("uvicorn.error")
+    error_logger.handlers = [logging.FileHandler(log_file, encoding='utf-8')]
+    error_logger.propagate = False
+
+    # 禁用 uvicorn 的默认日志输出
+    uvicorn_logger.setLevel(logging.WARNING)
+    access_logger.setLevel(logging.WARNING)
+    error_logger.setLevel(logging.WARNING)
+
+    class StatusIndicator:
+
+        def __init__(self):
+            self.console = Console()
+            self.layout = Layout()
+            self.status_lines = []
+            self.max_lines = 10
+            self.last_update_time = None
+            self.is_shutting_down = False
+            self.live = None
+
+        def create_header(self):
+            """创建服务器信息头部"""
+            header = Table.grid(padding=(0, 1))
+            header.add_column("header", style="bold cyan")
+            header.add_row("🚀 MCP多终端服务器")
+            header.add_row(f"📡 服务器地址: http://{args.host}:{args.port}")
+            header.add_row(f"📥 SSE GET端点: {DEFAULT_SSE_PATH}")
+            header.add_row(f"📤 SSE POST消息端点: {DEFAULT_POST_MESSAGE_PATH}")
+            return Panel(header, title="服务器信息", border_style="cyan", width=80)
+
+        def create_status_section(self):
+            """创建状态监控部分"""
+            status_table = Table.grid(padding=(0, 1))
+            status_table.add_column("status", style="bold", width=3)
+            status_table.add_column("message", width=75)
+
+            for line in self.status_lines:
+                status_table.add_row(line["status"], line["message"])
+
+            if self.last_update_time:
+                status_table.add_row(
+                    "", f"最后更新: {self.last_update_time.strftime('%H:%M:%S')}")
+
+            return Panel(status_table,
+                         title="状态监控",
+                         border_style="green",
+                         width=80)
+
+        def update_status(self, message, status="running", section="main"):
+            """更新状态信息"""
+            current_time = datetime.datetime.now()
+
+            if status == "running":
+                status_icon = Spinner("dots", text=message)
+            elif status == "success":
+                status_icon = "✅"
+            elif status == "error":
+                status_icon = "❌"
+            elif status == "warning":
+                status_icon = "⚠️"
+            else:
+                status_icon = "•"
+
+            status_line = {"status": status_icon, "message": message}
+
+            if section == "main":
+                if self.status_lines:
+                    self.status_lines[0] = status_line
+                else:
+                    self.status_lines = [status_line]
+            else:
+                if len(self.status_lines) >= self.max_lines:
+                    self.status_lines.pop()
+                self.status_lines.insert(1, status_line)
+
+            self.last_update_time = current_time
+            self.refresh_display()
+
+        def refresh_display(self):
+            """刷新显示"""
+            if not self.live:
+                self.live = Live(self.create_layout(),
+                                 console=self.console,
+                                 refresh_per_second=4,
+                                 vertical_overflow="visible",
+                                 auto_refresh=True)
+                self.live.start()
+            else:
+                self.live.update(self.create_layout())
+
+        def create_layout(self):
+            """创建整体布局"""
+            self.layout.split(
+                Layout(name="header", size=6),
+                Layout(name="status", size=len(self.status_lines) + 3))
+
+            self.layout["header"].update(self.create_header())
+            self.layout["status"].update(self.create_status_section())
+
+            return self.layout
+
+        def show_server_info(self, host, port, sse_path, post_path):
+            """显示服务器信息"""
+            self.console.clear()
+            self.console.print(self.create_header())
+
+        def clear_status(self):
+            """清除所有状态"""
+            self.status_lines = []
+            self.last_update_time = None
+            self.is_shutting_down = False
+            if self.live:
+                self.live.stop()
+                self.live = None
+
+    status = StatusIndicator()
 
     parser = argparse.ArgumentParser(description='运行MCP多终端服务器')
     parser.add_argument('--host',
@@ -683,6 +1205,15 @@ if __name__ == "__main__":
     logger.info(f"SSE GET端点: {DEFAULT_SSE_PATH}")
     logger.info(f"SSE POST消息端点: {DEFAULT_POST_MESSAGE_PATH}")
 
+    # 添加美化输出
+    print("\n" + "=" * 50)
+    print("🚀 MCP多终端服务器启动")
+    print("=" * 50)
+    print(f"📡 服务器地址: http://{args.host}:{args.port}")
+    print(f"📥 SSE GET端点: {DEFAULT_SSE_PATH}")
+    print(f"📤 SSE POST消息端点: {DEFAULT_POST_MESSAGE_PATH}")
+    print("=" * 50 + "\n")
+
     sse_transport = SseServerTransport(DEFAULT_POST_MESSAGE_PATH)
 
     async def handle_sse_connection(request: Request) -> None:
@@ -710,18 +1241,22 @@ if __name__ == "__main__":
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
 
-    config = uvicorn.Config(app=root_starlette_app,
-                            host=args.host,
-                            port=args.port,
-                            loop="asyncio",
-                            lifespan="on",
-                            log_level="info")
+    config = uvicorn.Config(
+        app=root_starlette_app,
+        host=args.host,
+        port=args.port,
+        loop="asyncio",
+        lifespan="on",
+        log_level="warning",  # 设置 uvicorn 的日志级别为 warning
+        access_log=False,  # 禁用访问日志
+        log_config=None  # 禁用默认日志配置
+    )
     server = uvicorn.Server(config=config)
 
     should_exit_event = asyncio.Event()
 
     def signal_handler(sig: int, frame: Optional[Any]):
-        logger.info(f"操作系统信号 {sig} 被TS接收。启动优雅关闭。")
+        print("\n正在优雅关闭服务器...")
         should_exit_event.set()
         TS_SHUTDOWN_EVENT.set()
         if hasattr(server, 'should_exit'):
@@ -747,47 +1282,53 @@ if __name__ == "__main__":
         try:
             await server_task
         except asyncio.CancelledError:
-            logger.info("Uvicorn服务器任务被取消。")
+            status.update_status("服务器正在关闭...", "warning", "main")
+            status.refresh_display()
         except Exception as e:
             logger.error(f"Uvicorn server.serve() 任务因异常结束: {e}", exc_info=True)
             should_exit_event.set()
 
         if should_exit_event.is_set():
-            logger.info("关闭信号已处理，Uvicorn服务器已停止或正在停止。")
+            status.update_status("服务器已停止", "success", "main")
+            status.refresh_display()
 
         if not server_task.done():
-            logger.info("Uvicorn服务器任务未完成，尝试再次取消。")
             server_task.cancel()
             try:
                 await asyncio.wait_for(server_task, timeout=5.0)
-            except asyncio.TimeoutError:
-                logger.error("等待Uvicorn服务器任务完成取消超时。")
-            except asyncio.CancelledError:
-                logger.info("Uvicorn服务器任务在最终检查期间成功取消。")
+            except (asyncio.TimeoutError, asyncio.CancelledError):
+                pass
             except Exception as e_final_await:
                 logger.error(f"最终等待Uvicorn服务器任务时出错: {e_final_await}")
 
     try:
-        logger.info("启动主服务器运行程序 (TS)...")
+        status.show_server_info(args.host, args.port, DEFAULT_SSE_PATH,
+                                DEFAULT_POST_MESSAGE_PATH)
+        status.update_status("服务器正在启动...", "running", "main")
+        status.refresh_display()
         loop.run_until_complete(main_server_runner())
     except KeyboardInterrupt:
-        logger.info("TS服务器在主块中捕获到KeyboardInterrupt。")
+        status.update_status("正在关闭服务器...", "warning", "main")
+        status.refresh_display()
     except Exception as e:
         logger.critical(f"TS服务器在主执行块中崩溃: {e}", exc_info=True)
+        status.update_status(f"服务器崩溃: {str(e)}", "error", "main")
+        status.refresh_display()
     finally:
-        logger.info("TS服务器主执行块 'finally' 到达。确保完全清理。")
-        if not TS_SHUTDOWN_EVENT.is_set(): TS_SHUTDOWN_EVENT.set()
+        if not TS_SHUTDOWN_EVENT.is_set():
+            TS_SHUTDOWN_EVENT.set()
 
         for fut_id in list(request_futures.keys()):
             fut = request_futures.pop(fut_id, None)
-            if fut and not fut.done(): fut.cancel("TS在main中进行最终清理。")
+            if fut and not fut.done():
+                fut.cancel("TS在main中进行最终清理。")
 
         if loop and not loop.is_closed():
             try:
                 if loop.is_running():
                     loop.run_until_complete(asyncio.sleep(0.2))
-            except RuntimeError as e_loop_sleep:
-                logger.debug(f"最终清理期间的循环休眠: {e_loop_sleep}")
+            except RuntimeError:
+                pass
 
             try:
                 current_task = asyncio.current_task(
@@ -797,34 +1338,22 @@ if __name__ == "__main__":
                     if t is not current_task and not t.done()
                 ]
                 if tasks:
-                    logger.debug(f"在最终TS清理期间取消 {len(tasks)} 个未完成的任务。")
                     for task in tasks:
                         task.cancel()
                     if loop.is_running():
                         loop.run_until_complete(
                             asyncio.gather(*tasks, return_exceptions=True))
-                    else:
-                        logger.warning("循环已停止，无法完全等待剩余任务的取消。")
 
                 if loop.is_running():
-                    logger.debug("在TS中关闭异步生成器。")
                     loop.run_until_complete(loop.shutdown_asyncgens())
-                else:
-                    logger.warning("循环已停止，无法关闭异步生成器。")
-
-            except RuntimeError as e_loop_state:
-                logger.warning(
-                    f"最终循环任务/生成器清理期间的RuntimeError: {e_loop_state} (循环可能已关闭或停止)"
-                )
-            except Exception as e_final_cleanup_tasks:
-                logger.error(
-                    f"最终asyncio任务/生成器清理期间的异常: {e_final_cleanup_tasks}",
-                    exc_info=True)
+            except Exception:
+                pass
             finally:
                 if not loop.is_closed():
                     if loop.is_running():
                         loop.stop()
                     loop.close()
-                    logger.info("Asyncio事件循环在TS最终清理中关闭。")
 
-        logger.info("TS服务器已完全关闭。")
+        status.clear_status()
+        status.update_status("服务器已完全关闭", "success", "main")
+        status.refresh_display()
