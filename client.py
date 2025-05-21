@@ -256,10 +256,30 @@ async def run_tmux_command_for_session(
 async def get_tmux_pane_content_for_session(tmux_session_name: str,
                                             strip_ansi: bool = False
                                             ) -> Optional[str]:
+    # 获取历史记录大小
+    success, history_size, _ = await run_tmux_command_for_session(
+        tmux_session_name,
+        ["display-message", "-p", "-t", f"{tmux_session_name}:0.0", "#{history_size}"],
+        timeout=5.0
+    )
+    
+    if not success:
+        logger.warning(f"获取会话 {tmux_session_name} 的历史记录大小失败")
+        return None
+        
+    try:
+        history_size = int(history_size.strip())
+    except ValueError:
+        logger.warning(f"无效的历史记录大小: {history_size}")
+        return None
+        
+    # 使用 -S 和 -E 参数捕获完整历史记录
     success, stdout, stderr = await run_tmux_command_for_session(
         tmux_session_name,
-        ["capture-pane", "-ept", f"{tmux_session_name}:0.0"],
-        timeout=5.0)
+        ["capture-pane", "-ept", f"{tmux_session_name}:0.0", "-S", f"-{history_size}", "-E", "0"],
+        timeout=5.0
+    )
+    
     if success:
         return strip_ansi_codes(stdout) if strip_ansi else stdout
     logger.warning(f"捕获会话 {tmux_session_name} 的面板内容失败: {stderr}")
